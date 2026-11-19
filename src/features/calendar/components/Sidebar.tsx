@@ -2,6 +2,22 @@ import type { JSX } from 'react'
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { createPortal } from 'react-dom'
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion, useMotionValue } from 'framer-motion'
 import { useReducedMotion } from '@/hooks/useReducedMotion'
 import { useDrawerDrag } from '@/hooks/useDrawerDrag'
@@ -29,6 +45,8 @@ import {
   syncErrorReason,
 } from '@/features/caldav/client/errorMessages'
 import { useCalendarStore } from '@/store/calendarStore'
+import { orderCalendars } from '@/lib/calendarOrder'
+import { hapticIfEnabled } from '@/lib/haptics'
 import { useSettingsStore } from '@/store/settingsStore'
 import { getMonthNames, getNarrowWeekdayLabels } from './weekdayLabels'
 import { useCalDAVSyncStore } from '@/store/caldavSyncStore'
@@ -70,6 +88,71 @@ interface SidebarProps {
   onClose?: () => void
   isCollapsed?: boolean
   onCollapsedChange?: (collapsed: boolean) => void
+}
+
+/**
+ * One row of the calendar list. It is a `<label>` so a click anywhere on it
+ * toggles the checkbox, which means the drag handle must not be a `<button>`
+ * (a button is labelable, and as the first one in the row it would steal the
+ * label's click). A role="button" span from dnd-kit's attributes is not.
+ */
+function SortableCalendarItem({
+  id,
+  handleLabel,
+  onContextMenu,
+  children,
+}: {
+  id: string
+  handleLabel: string
+  onContextMenu: (event: React.MouseEvent) => void
+  children: React.ReactNode
+}): JSX.Element {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id })
+  return (
+    <label
+      ref={setNodeRef}
+      className={`${styles.calendarItem} ${isDragging ? styles.calendarItemDragging : ''}`}
+      style={{
+        // Vertical list: ignore any sideways drift of the pointer.
+        transform: CSS.Transform.toString(
+          transform && { ...transform, x: 0, scaleX: 1, scaleY: 1 }
+        ),
+        transition,
+      }}
+      onContextMenu={onContextMenu}
+      data-component="calendar-item"
+    >
+      <span
+        ref={setActivatorNodeRef}
+        className={styles.dragHandle}
+        {...attributes}
+        {...listeners}
+        // The handle sits inside the label; without this a click on it would
+        // fall through and toggle the calendar's visibility.
+        onClick={(event) => event.preventDefault()}
+        aria-label={handleLabel}
+        data-component="calendar-drag-handle"
+      >
+        <svg aria-hidden="true" width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
+          <circle cx="2.5" cy="2.5" r="1.2" />
+          <circle cx="7.5" cy="2.5" r="1.2" />
+          <circle cx="2.5" cy="7" r="1.2" />
+          <circle cx="7.5" cy="7" r="1.2" />
+          <circle cx="2.5" cy="11.5" r="1.2" />
+          <circle cx="7.5" cy="11.5" r="1.2" />
+        </svg>
+      </span>
+      {children}
+    </label>
+  )
 }
 
 export function Sidebar({
@@ -121,7 +204,23 @@ export function Sidebar({
   const colorPickerRef = useRef<HTMLDivElement>(null)
   const currentDate = useCalendarStore((state) => state.currentDate)
   const setCurrentDate = useCalendarStore((state) => state.setCurrentDate)
-  const calendars = useCalendarStore((state) => state.calendars)
+  const storedCalendars = useCalendarStore((state) => state.calendars)
+  const calendars = useMemo(() => orderCalendars(storedCalendars), [storedCalendars])
+  const reorderCalendars = useCalendarStore((state) => state.reorderCalendars)
+  // Activation distance keeps a click on the handle from starting a drag;
+  // the keyboard sensor makes the handle usable without a pointer.
+  const calendarSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )
+  const handleCalendarDragEnd = useCallback(
+    ({ active, over }: DragEndEvent): void => {
+      if (!over || active.id === over.id) return
+      reorderCalendars(String(active.id), String(over.id))
+      hapticIfEnabled('light')
+    },
+    [reorderCalendars]
+  )
   const categories = useCalendarStore((state) => state.categories)
   const selectedCategoryIds = useCalendarStore((state) => state.selectedCategoryIds)
   const toggleCategoryFilter = useCalendarStore((state) => state.toggleCategoryFilter)
@@ -788,168 +887,186 @@ export function Sidebar({
                       }
                     />
                   )}
-                  {calendars.map((calendar) => (
-                    <label
-                      key={calendar.id}
-                      className={styles.calendarItem}
-                      onContextMenu={(e) => handleContextMenu(e, calendar.id)}
+                  <DndContext
+                    sensors={calendarSensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleCalendarDragEnd}
+                  >
+                    <SortableContext
+                      items={calendars.map((calendar) => calendar.id)}
+                      strategy={verticalListSortingStrategy}
                     >
-                      <input
-                        type="checkbox"
-                        checked={calendar.isVisible}
-                        onChange={(e) => {
-                          // Alt/Option-click is the shortcut for "Show only this calendar".
-                          // A checkbox's change event is driven by its click, so
-                          // the native event carries the modifier keys.
-                          if (e.nativeEvent instanceof MouseEvent && e.nativeEvent.altKey) {
-                            isolateCalendar(calendar.id)
-                          } else {
-                            toggleCalendarVisibility(calendar.id)
-                          }
-                        }}
-                        className={styles.checkbox}
-                        data-component="calendar-visibility-toggle"
-                        data-calendar-id={calendar.id}
-                        aria-label={t('views.sidebar.showCalendarName', { name: calendar.name })}
-                      />
-                      <div
-                        className={styles.colorPicker}
-                        ref={colorPickerCalendarId === calendar.id ? colorPickerRef : undefined}
-                      >
-                        <button
-                          type="button"
-                          className={styles.colorDot}
-                          style={{ backgroundColor: calendar.color }}
-                          onClick={(event) => {
-                            event.preventDefault()
-                            setColorPickerCalendarId((current) =>
-                              current === calendar.id ? null : calendar.id
-                            )
-                          }}
-                          aria-label={t('views.sidebar.changeCalendarColor', {
-                            name: calendar.name,
-                          })}
-                          aria-expanded={colorPickerCalendarId === calendar.id}
-                          aria-controls={`calendar-color-picker-${calendar.id}`}
-                        />
-                        {colorPickerCalendarId === calendar.id && (
+                      {calendars.map((calendar) => (
+                        <SortableCalendarItem
+                          key={calendar.id}
+                          id={calendar.id}
+                          handleLabel={t('views.sidebar.reorderCalendar', { name: calendar.name })}
+                          onContextMenu={(e) => handleContextMenu(e, calendar.id)}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={calendar.isVisible}
+                            onChange={(e) => {
+                              // Alt/Option-click is the shortcut for "Show only this calendar".
+                              // A checkbox's change event is driven by its click, so
+                              // the native event carries the modifier keys.
+                              if (e.nativeEvent instanceof MouseEvent && e.nativeEvent.altKey) {
+                                isolateCalendar(calendar.id)
+                              } else {
+                                toggleCalendarVisibility(calendar.id)
+                              }
+                            }}
+                            className={styles.checkbox}
+                            data-component="calendar-visibility-toggle"
+                            data-calendar-id={calendar.id}
+                            aria-label={t('views.sidebar.showCalendarName', {
+                              name: calendar.name,
+                            })}
+                          />
                           <div
-                            id={`calendar-color-picker-${calendar.id}`}
-                            className={styles.colorPickerMenu}
-                            role="group"
-                            aria-label={t('views.sidebar.colorPickerFor', { name: calendar.name })}
-                            data-component="calendar-color-picker"
+                            className={styles.colorPicker}
+                            ref={colorPickerCalendarId === calendar.id ? colorPickerRef : undefined}
                           >
-                            <div className={styles.colorPresets}>
-                              {CALENDAR_COLOR_PRESETS.map((color) => (
-                                <button
-                                  key={color}
-                                  type="button"
-                                  className={`${styles.colorPreset} ${calendar.color.toLowerCase() === color.toLowerCase() ? styles.colorPresetSelected : ''}`}
-                                  style={{ backgroundColor: color }}
-                                  onClick={(event) => {
-                                    event.preventDefault()
-                                    handleColorChange(calendar.id, color)
-                                  }}
-                                  aria-label={t('views.sidebar.useColorFor', {
-                                    color,
-                                    name: calendar.name,
-                                  })}
-                                />
-                              ))}
-                              <span
-                                className={`${styles.customColorPicker} ${
-                                  !CALENDAR_COLOR_PRESETS.some(
-                                    (preset) =>
-                                      preset.toLowerCase() === calendar.color.toLowerCase()
-                                  )
-                                    ? styles.customColorPickerSelected
-                                    : ''
-                                }`}
+                            <button
+                              type="button"
+                              className={styles.colorDot}
+                              style={{ backgroundColor: calendar.color }}
+                              onClick={(event) => {
+                                event.preventDefault()
+                                setColorPickerCalendarId((current) =>
+                                  current === calendar.id ? null : calendar.id
+                                )
+                              }}
+                              aria-label={t('views.sidebar.changeCalendarColor', {
+                                name: calendar.name,
+                              })}
+                              aria-expanded={colorPickerCalendarId === calendar.id}
+                              aria-controls={`calendar-color-picker-${calendar.id}`}
+                            />
+                            {colorPickerCalendarId === calendar.id && (
+                              <div
+                                id={`calendar-color-picker-${calendar.id}`}
+                                className={styles.colorPickerMenu}
+                                role="group"
+                                aria-label={t('views.sidebar.colorPickerFor', {
+                                  name: calendar.name,
+                                })}
+                                data-component="calendar-color-picker"
                               >
-                                <input
-                                  type="color"
-                                  value={calendar.color}
-                                  onChange={(event) =>
-                                    handleColorChange(calendar.id, event.target.value)
-                                  }
-                                  aria-label={t('views.sidebar.customColorFor', {
-                                    name: calendar.name,
-                                  })}
-                                />
-                              </span>
-                            </div>
+                                <div className={styles.colorPresets}>
+                                  {CALENDAR_COLOR_PRESETS.map((color) => (
+                                    <button
+                                      key={color}
+                                      type="button"
+                                      className={`${styles.colorPreset} ${calendar.color.toLowerCase() === color.toLowerCase() ? styles.colorPresetSelected : ''}`}
+                                      style={{ backgroundColor: color }}
+                                      onClick={(event) => {
+                                        event.preventDefault()
+                                        handleColorChange(calendar.id, color)
+                                      }}
+                                      aria-label={t('views.sidebar.useColorFor', {
+                                        color,
+                                        name: calendar.name,
+                                      })}
+                                    />
+                                  ))}
+                                  <span
+                                    className={`${styles.customColorPicker} ${
+                                      !CALENDAR_COLOR_PRESETS.some(
+                                        (preset) =>
+                                          preset.toLowerCase() === calendar.color.toLowerCase()
+                                      )
+                                        ? styles.customColorPickerSelected
+                                        : ''
+                                    }`}
+                                  >
+                                    <input
+                                      type="color"
+                                      value={calendar.color}
+                                      onChange={(event) =>
+                                        handleColorChange(calendar.id, event.target.value)
+                                      }
+                                      aria-label={t('views.sidebar.customColorFor', {
+                                        name: calendar.name,
+                                      })}
+                                    />
+                                  </span>
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                      {editingId === calendar.id ? (
-                        <input
-                          ref={inputRef}
-                          type="text"
-                          value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          onBlur={handleFinishRename}
-                          onKeyDown={handleKeyDown}
-                          className={styles.renameInput}
-                        />
-                      ) : (
-                        <span
-                          className={styles.calendarName}
-                          onDoubleClick={() => handleStartRename(calendar.id, calendar.name)}
-                        >
-                          {calendar.name}
-                        </span>
-                      )}
-                      {calendar.accountId && (
-                        <button
-                          className={`${styles.syncButton} ${syncingCalendarId === calendar.id || syncState.status === 'syncing' || globalSyncStatus === 'syncing' ? styles.syncing : ''} ${syncStatus[calendar.id] === 'success' ? styles.success : ''} ${syncStatus[calendar.id] === 'error' ? styles.error : ''}`}
-                          onClick={() => handleSyncCalendar(calendar.id, calendar.accountId)}
-                          title={t('views.sidebar.syncCalendar')}
-                          aria-label={t('views.sidebar.syncCalendarName', { name: calendar.name })}
-                          disabled={!!syncingCalendarId}
-                        >
-                          {syncStatus[calendar.id] === 'success' ? (
-                            <svg
-                              aria-hidden="true"
-                              width="14"
-                              height="14"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                            >
-                              <path d="M20 6L9 17l-5-5" />
-                            </svg>
-                          ) : syncStatus[calendar.id] === 'error' ? (
-                            <svg
-                              aria-hidden="true"
-                              width="14"
-                              height="14"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                            >
-                              <path d="M18 6L6 18M6 6l12 12" />
-                            </svg>
+                          {editingId === calendar.id ? (
+                            <input
+                              ref={inputRef}
+                              type="text"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                              onBlur={handleFinishRename}
+                              onKeyDown={handleKeyDown}
+                              className={styles.renameInput}
+                            />
                           ) : (
-                            <svg
-                              aria-hidden="true"
-                              width="14"
-                              height="14"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
+                            <span
+                              className={styles.calendarName}
+                              onDoubleClick={() => handleStartRename(calendar.id, calendar.name)}
                             >
-                              <path d="M23 4v6h-6M1 20v-6h6" />
-                              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-                            </svg>
+                              {calendar.name}
+                            </span>
                           )}
-                        </button>
-                      )}
-                    </label>
-                  ))}
+                          {calendar.accountId && (
+                            <button
+                              className={`${styles.syncButton} ${syncingCalendarId === calendar.id || syncState.status === 'syncing' || globalSyncStatus === 'syncing' ? styles.syncing : ''} ${syncStatus[calendar.id] === 'success' ? styles.success : ''} ${syncStatus[calendar.id] === 'error' ? styles.error : ''}`}
+                              onClick={() => handleSyncCalendar(calendar.id, calendar.accountId)}
+                              title={t('views.sidebar.syncCalendar')}
+                              aria-label={t('views.sidebar.syncCalendarName', {
+                                name: calendar.name,
+                              })}
+                              disabled={!!syncingCalendarId}
+                            >
+                              {syncStatus[calendar.id] === 'success' ? (
+                                <svg
+                                  aria-hidden="true"
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                >
+                                  <path d="M20 6L9 17l-5-5" />
+                                </svg>
+                              ) : syncStatus[calendar.id] === 'error' ? (
+                                <svg
+                                  aria-hidden="true"
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                >
+                                  <path d="M18 6L6 18M6 6l12 12" />
+                                </svg>
+                              ) : (
+                                <svg
+                                  aria-hidden="true"
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                >
+                                  <path d="M23 4v6h-6M1 20v-6h6" />
+                                  <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                                </svg>
+                              )}
+                            </button>
+                          )}
+                        </SortableCalendarItem>
+                      ))}
+                    </SortableContext>
+                  </DndContext>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1113,6 +1230,34 @@ export function Sidebar({
                 x={contextMenu.x}
                 y={contextMenu.y}
                 items={[
+                  ...(() => {
+                    const index = calendars.findIndex((c) => c.id === contextMenu.calendarId)
+                    const move = (offset: -1 | 1): void => {
+                      const target = calendars[index + offset]
+                      if (target) reorderCalendars(contextMenu.calendarId, target.id)
+                      closeContextMenu()
+                    }
+                    return [
+                      ...(index > 0
+                        ? [
+                            {
+                              label: t('views.sidebar.moveCalendarUp'),
+                              dataComponent: 'calendar-move-up',
+                              onClick: () => move(-1),
+                            },
+                          ]
+                        : []),
+                      ...(index >= 0 && index < calendars.length - 1
+                        ? [
+                            {
+                              label: t('views.sidebar.moveCalendarDown'),
+                              dataComponent: 'calendar-move-down',
+                              onClick: () => move(1),
+                            },
+                          ]
+                        : []),
+                    ]
+                  })(),
                   isCalendarIsolated
                     ? {
                         label: t('views.sidebar.showAllCalendars'),

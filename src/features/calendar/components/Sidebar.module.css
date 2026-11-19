@@ -663,6 +663,45 @@
   opacity: 1;
 }
 
+/* Grip for reordering. Hidden until the row is hovered or the handle has
+   keyboard focus so the list stays quiet; always shown where there is no hover. */
+.dragHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  /* Pull the grip into the row's left padding so the checkbox doesn't shift. */
+  margin: 0 -6px 0 -6px;
+  color: var(--ink-3);
+  cursor: grab;
+  opacity: 0;
+  touch-action: none;
+  transition: opacity var(--dur-fast);
+}
+
+.calendarItem:hover .dragHandle,
+.dragHandle:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .dragHandle {
+    opacity: 0.6;
+  }
+}
+
+.calendarItemDragging {
+  position: relative;
+  z-index: 2;
+  background: var(--surface, #fff);
+  box-shadow: 0 2px 8px rgba(var(--ink-raw, 44, 40, 33), 0.18);
+}
+
+.calendarItemDragging .dragHandle {
+  cursor: grabbing;
+}
+
 /* Without a hover state there is no way to reveal this, so per-calendar sync
    was simply unreachable on touch. Show it outright instead. */
 @media (hover: none) {

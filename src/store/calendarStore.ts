@@ -40,6 +40,7 @@ import {
   storedDayKey,
 } from '@/lib/homeTimezone'
 import { createUuid } from '@/lib/uuid'
+import { sortOrdersAfterMove } from '@/lib/calendarOrder'
 
 // Memo cache for getEventsForDateRange. Keyed by the range; a cached result is
 // reused only when its stored `version` matches the current
@@ -1122,6 +1123,19 @@ export const useCalendarStore = create<CalendarStore>()(
           ),
         }))
         bumpRangeExpansionVersion()
+      },
+
+      reorderCalendars: (activeId: string, overId: string): void => {
+        const orders = sortOrdersAfterMove(get().calendars, activeId, overId)
+        if (!orders) return
+        // Only `sortOrder` changes, so the array keeps its stored order and the
+        // sidebar derives the displayed one. No range re-expansion is needed:
+        // which calendars are visible hasn't changed.
+        set((state) => ({
+          calendars: state.calendars.map((c) =>
+            orders.has(c.id) ? { ...c, sortOrder: orders.get(c.id) } : c
+          ),
+        }))
       },
 
       isolateCalendar: (id: string): void => {
