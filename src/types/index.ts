@@ -171,6 +171,12 @@ export interface Calendar {
   isDefault: boolean
   accountId?: string
   showTasksInViews: boolean
+  /**
+   * Position the user gave this calendar by dragging it in the sidebar. Owned
+   * by the UI: sync never writes it. Calendars without one are listed after
+   * those that have one (see `orderCalendars`).
+   */
+  sortOrder?: number
   supportedComponents?: CalendarComponent[]
   // Undefined ≈ local/caldav (existing behavior, unchanged for old data).
   source?: CalendarSource
@@ -358,6 +364,8 @@ export interface CalendarActions {
   updateCalendar: (id: string, updates: Partial<Calendar>) => void
   deleteCalendar: (id: string) => void
   toggleCalendarVisibility: (id: string) => void
+  /** Move `activeId` into the slot `overId` occupies and renumber `sortOrder`. */
+  reorderCalendars: (activeId: string, overId: string) => void
   /**
    * Show only `id` and hide every other calendar. The first isolation saves
    * the current visibility to `calendarVisibilitySnapshot`; isolating another
